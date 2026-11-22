@@ -4,43 +4,32 @@ import logging
 logger = logging.getLogger(__name__)
 
 def analyze_free_space(depth_map: np.ndarray) -> dict:
-    """
-    Analyzes the bottom-center of the image (the path of travel) to see if it is clear.
-    
-    Args:
-        depth_map: A 2D NumPy array of relative depth values.
-        
-    Returns:
-        A dictionary with a boolean 'is_clear' and the 'path_depth'.
-    """
     h, w = depth_map.shape
-    
-    # 1. Define the Path of Travel ROI (Region of Interest)
-    # We look at the bottom 40% of the image (the floor)
-    # We look at the center 40% of the width (directly ahead)
     y_start = int(h * 0.60)
     y_end = h
-    x_start = int(w * 0.30)
-    x_end = int(w * 0.70)
     
-    path_roi = depth_map[y_start:y_end, x_start:x_end]
+    c_x_start, c_x_end = int(w * 0.35), int(w * 0.65)
+    l_x_start, l_x_end = int(w * 0.05), int(w * 0.30)
+    r_x_start, r_x_end = int(w * 0.70), int(w * 0.95)
     
-    if path_roi.size == 0:
-        return {"is_clear": False, "path_depth": None}
+    center_roi = depth_map[y_start:y_end, c_x_start:c_x_end]
+    left_roi = depth_map[y_start:y_end, l_x_start:l_x_end]
+    right_roi = depth_map[y_start:y_end, r_x_start:r_x_end]
 
-    # 2. Calculate the median depth of the floor ahead
-    path_depth = np.percentile(path_roi, 50)
+    center_depth = np.percentile(center_roi, 50) if center_roi.size > 0 else 0.0
+    left_depth = np.percentile(left_roi, 50) if left_roi.size > 0 else 0.0
+    right_depth = np.percentile(right_roi, 50) if right_roi.size > 0 else 0.0
+
+    # STRICTER THRESHOLD: 3.2 instead of 4.0
+    THRESHOLD = 3.2
     
-    # 3. Rule-based threshold. 
-    # If the path depth is HIGH (e.g., > 3.5), it means something is very close.
-    if path_depth > 3.5:
-        is_clear = False
-        logger.info(f"Path BLOCKED. Depth: {path_depth:.2f}")
-    else:
-        is_clear = True
-        logger.info(f"Path CLEAR. Depth: {path_depth:.2f}")
-        
     return {
-        "is_clear": is_clear,
-        "path_depth": float(path_depth)
+        "center_clear": bool(center_depth < THRESHOLD),
+        "left_clear": bool(left_depth < THRESHOLD),
+        "right_clear": bool(right_depth < THRESHOLD),
+        "depths": {
+            "center": float(center_depth),
+            "left": float(left_depth),
+            "right": float(right_depth)
+        }
     }

@@ -1,0 +1,314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NaviSense</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #121212;
+            color: white;
+            text-align: center;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+        }
+        #video-container {
+            position: relative;
+            width: 100vw;
+            height: 60vh;
+            background: black;
+        }
+        video {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        /* The overlay canvas sits exactly on top of the video */
+        #overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none; /* Let clicks pass through to the video/buttons */
+        }
+        #status-overlay {
+            position: absolute;
+            bottom: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+        #advice-container {
+            height: 40vh;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+            background-color: #1e1e1e;
+        }
+        #advice-text {
+            font-size: 24px;
+            font-weight: bold;
+            color: #4CAF50;
+            margin-bottom: 20px;
+            text-align: center;
+            padding: 0 10px;
+        }
+        #start-btn {
+            padding: 15px 30px;
+            font-size: 18px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+        }
+        #start-btn:disabled {
+            background-color: #555;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="video-container">
+        <video id="camera" autoplay playsinline muted></video>
+        <canvas id="overlay"></canvas>
+        <div id="status-overlay">Status: <span id="status">Disconnected</span></div>
+    </div>
+
+    <div id="advice-container">
+        <div id="advice-text">Press Start to begin guidance</div>
+        <button id="start-btn">Start NaviSense</button>
+    </div>
+
+    <!-- Hidden canvas used to resize and capture frames before sending to backend -->
+    <canvas id="capture-canvas" style="display: none;"></canvas>
+
+    <script>
+        const video = document.getElementById('camera');
+        const overlayCanvas = document.getElementById('overlay');
+        const overlayCtx = overlayCanvas.getContext('2d');
+        const captureCanvas = document.getElementById('capture-canvas');
+        const ctx = captureCanvas.getContext('2d');
+        
+        const startBtn = document.getElementById('start-btn');
+        const statusSpan = document.getElementById('status');
+        const adviceText = document.getElementById('advice-text');
+
+        let isRunning = false;
+        let isProcessing = false;
+        
+        // Smoothing variables
+        let adviceHistory = [];
+        const SMOOTHING_WINDOW = 3; 
+        let lastSpokenAdvice = "";
+        let lastSpokenTime = 0;
+
+        // Initialize Audio Context for spatial panning
+        let audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        let panner = audioCtx.createStereoPanner();
+        panner.connect(audioCtx.destination);
+
+        // 1. Start Camera
+        async function startCamera() {
+            try {
+                // Request the back camera on mobile
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    video: { facingMode: "environment" } 
+                });
+                video.srcObject = stream;
+                statusSpan.innerText = "Connected";
+                startBtn.disabled = true;
+                isRunning = true;
+                captureLoop();
+            } catch (err) {
+                alert("Camera access denied or unavailable: " + err.message);
+            }
+        }
+
+        // 2. Capture and Send Frames to Backend
+        async function captureLoop() {
+            if (!isRunning) return;
+
+            // If the backend is still processing the last frame, skip this one
+            if (isProcessing) {
+                requestAnimationFrame(captureLoop);
+                return;
+            }
+
+            // Resize logic: max side 640px. 
+            // We send 640px to the backend to keep latency low, and scale boxes back up for the screen.
+            const videoWidth = video.videoWidth;
+            const videoHeight = video.videoHeight;
+            
+            if (videoWidth === 0) {
+                requestAnimationFrame(captureLoop);
+                return;
+            }
+
+            const maxSide = 640;
+            let targetWidth = videoWidth;
+            let targetHeight = videoHeight;
+            
+            if (Math.max(videoWidth, videoHeight) > maxSide) {
+                const scale = maxSide / Math.max(videoWidth, videoHeight);
+                targetWidth = Math.round(videoWidth * scale);
+                targetHeight = Math.round(videoHeight * scale);
+            }
+
+            captureCanvas.width = targetWidth;
+            captureCanvas.height = targetHeight;
+            ctx.drawImage(video, 0, 0, targetWidth, targetHeight);
+
+            captureCanvas.toBlob(async (blob) => {
+                if (!blob) return;
+                
+                isProcessing = true;
+                statusSpan.innerText = "Processing...";
+                
+                const formData = new FormData();
+                formData.append("file", blob, "frame.jpg");
+
+                try {
+                    const response = await fetch('/analyze-frame', {
+                        method: 'POST',
+                        body: formData
+                    });
+                    
+                    if (response.ok) {
+                        const data = await response.json();
+                        handleResponse(data);
+                    }
+                } catch (e) {
+                    console.error("Error sending frame:", e);
+                } finally {
+                    isProcessing = false;
+                    statusSpan.innerText = "Connected";
+                }
+            }, 'image/jpeg', 0.8);
+
+            // Target ~2 FPS because the backend takes ~2.2s per frame on CPU
+            setTimeout(() => requestAnimationFrame(captureLoop), 200); 
+        }
+
+        // 3. Handle Response, Smoothing, and Voice
+        function handleResponse(data) {
+            if (data.status === "busy") return; // Backend dropped the frame
+
+            const rawAdvice = data.advice;
+            
+            // Draw the visual boxes immediately (doesn't need smoothing)
+            drawOverlay(data.objects);
+
+            // Temporal smoothing for voice: only speak if the last 3 frames agree
+            adviceHistory.push(rawAdvice);
+            if (adviceHistory.length > SMOOTHING_WINDOW) {
+                adviceHistory.shift(); 
+            }
+
+            if (adviceHistory.length === SMOOTHING_WINDOW) {
+                const allMatch = adviceHistory.every(val => val === adviceHistory[0]);
+                
+                if (allMatch) {
+                    const stableAdvice = adviceHistory[0];
+                    adviceText.innerText = stableAdvice;
+
+                    // Voice Output
+                    const now = Date.now();
+                    // Don't repeat the exact same advice too rapidly (wait at least 3.5 seconds)
+                    if (stableAdvice !== lastSpokenAdvice || (now - lastSpokenTime > 3500)) {
+                        speak(stableAdvice);
+                        lastSpokenAdvice = stableAdvice;
+                        lastSpokenTime = now;
+                    }
+                } else {
+                    // If they don't match, we are in a transition state
+                    adviceText.innerText = "Analyzing environment...";
+                }
+            }
+        }
+
+        // 4. Draw Bounding Boxes on the Overlay
+        function drawOverlay(objects) {
+            // Match the overlay canvas drawing buffer to its CSS display size
+            overlayCanvas.width = overlayCanvas.clientWidth;
+            overlayCanvas.height = overlayCanvas.clientHeight;
+            
+            overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+
+            // Calculate scaling factor (backend sends 640px image, display might be 1080p)
+            const scaleX = overlayCanvas.width / captureCanvas.width;
+            const scaleY = overlayCanvas.height / captureCanvas.height;
+
+            objects.forEach(obj => {
+                const [x1, y1, x2, y2] = obj.bbox;
+                
+                // Scale coordinates to the display canvas
+                const drawX = x1 * scaleX;
+                const drawY = y1 * scaleY;
+                const drawW = (x2 - x1) * scaleX;
+                const drawH = (y2 - y1) * scaleY;
+
+                // Color code by risk level
+                let color = "#00FF00"; // GREEN (Low)
+                if (obj.risk_level === "HIGH") color = "#FF0000"; // RED
+                else if (obj.risk_level === "MEDIUM") color = "#FFFF00"; // YELLOW
+
+                // Draw box
+                overlayCtx.strokeStyle = color;
+                overlayCtx.lineWidth = 4;
+                overlayCtx.strokeRect(drawX, drawY, drawW, drawH);
+
+                // Draw label background
+                overlayCtx.fillStyle = color;
+                const text = `${obj.label} (${obj.proximity})`;
+                overlayCtx.font = "bold 16px Arial";
+                const textWidth = overlayCtx.measureText(text).width;
+                overlayCtx.fillRect(drawX, Math.max(0, drawY - 24), textWidth + 10, 24);
+
+                // Draw label text
+                overlayCtx.fillStyle = "black";
+                overlayCtx.fillText(text, drawX + 5, Math.max(16, drawY - 6));
+            });
+        }
+
+        // 5. Voice Output with Spatial Audio Logic
+        function speak(text) {
+            if ('speechSynthesis' in window) {
+                window.speechSynthesis.cancel(); 
+                
+                const utterance = new SpeechSynthesisUtterance(text);
+                
+                // Spatial Audio Logic: Pan the voice to the ear where the danger is
+                if (text.includes("left")) {
+                    panner.pan.value = -1.0; // Left ear
+                } 
+                else if (text.includes("right")) {
+                    panner.pan.value = 1.0;  // Right ear
+                } 
+                else {
+                    panner.pan.value = 0.0;  // Center
+                }
+
+                utterance.rate = 1.1; // Slightly faster speech for urgency
+                window.speechSynthesis.speak(utterance);
+            }
+        }
+
+        startBtn.addEventListener('click', () => {
+            // Resume audio context if browser blocked it initially
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+            startCamera();
+        });
+    </script>
+</body>
+</html>
