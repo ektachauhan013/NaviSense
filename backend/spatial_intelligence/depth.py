@@ -6,44 +6,41 @@ import logging
 import matplotlib.pyplot as plt
 import os
 
-# 1. Setup logging so we can track what the module is doing
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class DepthEstimator:
     def __init__(self, model_id="depth-anything/Depth-Anything-V2-Small-hf"):
         """
-        Loads the Depth Anything V2 Small model into memory.
+        Loads the Depth Anything V2 Small model and initializes EMA state.
         """
         logger.info(f"Loading depth model: {model_id}")
         
-        # Load the processor (handles image resizing and normalization)
         self.processor = AutoImageProcessor.from_pretrained(model_id)
-        
-        # Load the model architecture and weights
         self.model = AutoModelForDepthEstimation.from_pretrained(model_id)
-        
-        # Set to evaluation mode
         self.model.eval()
         
-        # Move the model to GPU if available, otherwise CPU
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model.to(self.device)
+        
+        # --- EMA TEMPORAL SMOOTHING STATE ---
+        self.smoothed_depth_map = None
+        
         logger.info(f"Model successfully loaded on {self.device}")
 
     def predict(self, image: Image.Image) -> np.ndarray:
         """
-        Takes a PIL Image, runs it through the model, and returns a NumPy depth map.
+        Runs inference and applies Adaptive Exponential Moving Average (EMA) 
+        to smooth temporal noise between frames.
         """
-        # Preprocess: resize, normalize, and convert to PyTorch tensor
+        # 1. Preprocess
         inputs = self.processor(images=image, return_tensors="pt").to(self.device)
 
-        # Inference: disable gradient calculation to save memory
+        # 2. Raw Inference
         with torch.no_grad():
             outputs = self.model(**inputs)
             predicted_depth = outputs.predicted_depth
 
-        # Post-process: resize the depth map back to the original image size
+        # 3. Post-process (resize to original image dimensions)
         prediction = torch.nn.functional.interpolate(
             predicted_depth.unsqueeze(1),
             size=image.size[::-1], # (height, width)
@@ -51,53 +48,69 @@ class DepthEstimator:
             align_corners=False,
         )
         
-        # Convert from PyTorch tensor to NumPy array
-        depth_map = prediction.squeeze().cpu().numpy()
+        # 4. Convert to NumPy
+        raw_depth_map = prediction.squeeze().cpu().numpy()
         
-        return depth_map
+        # =====================================================================
+        # 5. ADAPTIVE TEMPORAL SMOOTHING (EMA)
+        # =====================================================================
+        if self.smoothed_depth_map is None:
+            # First frame: no previous map to blend with
+            self.smoothed_depth_map = raw_depth_map
+        else:
+            # Calculate mean absolute difference to detect motion
+            # If the scene is changing rapidly (user walking), diff will be high.
+            diff = np.mean(np.abs(raw_depth_map - self.smoothed_depth_map))
+            
+            if diff > 0.5:
+                # High motion: Trust the new frame more (alpha = 0.8)
+                alpha = 0.8
+            else:
+                # Stationary: Smooth heavily to eliminate flicker (alpha = 0.3)
+                alpha = 0.3
+                
+            # EMA Formula: D_smooth = (alpha * D_new) + ((1 - alpha) * D_old)
+            self.smoothed_depth_map = (alpha * raw_depth_map) + ((1.0 - alpha) * self.smoothed_depth_map)
+            
+        return self.smoothed_depth_map
 
 # This block only runs if we execute this file directly
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     logger.info("Starting depth estimation test...")
     
-    # 1. Define the path to your real image
     image_path = "datasets/test_image.jpg" 
     
     if not os.path.exists(image_path):
-        logger.error(f"Image not found at {image_path}! Please put an image there.")
+        logger.error(f"Image not found at {image_path}!")
         exit()
         
-    # 2. Load the real image
     real_image = Image.open(image_path).convert("RGB")
-    logger.info(f"Loaded image with size: {real_image.size}")
-    
-    # 3. Initialize and predict
     estimator = DepthEstimator()
-    depth_result = estimator.predict(real_image)
     
-    logger.info(f"Success! Output shape: {depth_result.shape}")
-    logger.info(f"Min depth: {depth_result.min():.4f}, Max depth: {depth_result.max():.4f}")
+    # Run it twice to simulate a video feed and test the EMA state
+    logger.info("Frame 1 (No EMA)")
+    depth_result_1 = estimator.predict(real_image)
     
-    # 4. Visualize the results using Matplotlib
-    # We create a side-by-side plot: Original on left, Depth on right
+    logger.info("Frame 2 (EMA applied)")
+    depth_result_2 = estimator.predict(real_image)
+    
+    logger.info(f"Success! Output shape: {depth_result_2.shape}")
+    logger.info(f"Min depth: {depth_result_2.min():.4f}, Max depth: {depth_result_2.max():.4f}")
+    
+    # Visualization
     fig, axes = plt.subplots(1, 2, figsize=(12, 6))
     
-    # Left: Original image
     axes[0].imshow(real_image)
     axes[0].set_title("Original Image")
     axes[0].axis("off")
     
-    # Right: Depth map
-    # We use 'inferno' colormap. 
-    # In Depth Anything V2, BRIGHTER colors (yellow) = CLOSER, DARKER (purple) = FARTHER.
-    im = axes[1].imshow(depth_result, cmap="inferno")
-    axes[1].set_title("Depth Map (Brighter = Closer)")
+    im = axes[1].imshow(depth_result_2, cmap="inferno")
+    axes[1].set_title("Smoothed Depth Map (EMA)")
     axes[1].axis("off")
     
-    # Add a colorbar to show the scale
     fig.colorbar(im, ax=axes[1], fraction=0.046, pad=0.04)
     
-    # Save the plot to the experiments folder
     os.makedirs("experiments", exist_ok=True)
     output_path = "experiments/depth_visualization.png"
     plt.savefig(output_path, bbox_inches="tight")

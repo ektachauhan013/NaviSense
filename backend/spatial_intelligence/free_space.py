@@ -4,32 +4,54 @@ import logging
 logger = logging.getLogger(__name__)
 
 def analyze_free_space(depth_map: np.ndarray) -> dict:
+    """
+    Analyzes free space using a Continuous 1D Clearance Profile.
+    
+    WHY: By dividing the floor into 15 thin strips, we can detect narrow gaps 
+    and accurately determine if there is a navigable path forward.
+    """
     h, w = depth_map.shape
-    y_start = int(h * 0.60)
-    y_end = h
+    y_start, y_end = int(h * 0.60), h  # Look at the bottom 40% (the floor)
     
-    c_x_start, c_x_end = int(w * 0.35), int(w * 0.65)
-    l_x_start, l_x_end = int(w * 0.05), int(w * 0.30)
-    r_x_start, r_x_end = int(w * 0.70), int(w * 0.95)
+    # 1. Divide the horizontal field of view into 15 vertical strips
+    num_strips = 15
+    strip_width = w // num_strips
+    THRESHOLD = 3.2 # If depth is higher than this, it's blocked
     
-    center_roi = depth_map[y_start:y_end, c_x_start:c_x_end]
-    left_roi = depth_map[y_start:y_end, l_x_start:l_x_end]
-    right_roi = depth_map[y_start:y_end, r_x_start:r_x_end]
+    clear_strips = []
+    depths = []
+    
+    # 2. Evaluate each strip individually
+    for i in range(num_strips):
+        sx1 = i * strip_width
+        sx2 = (i + 1) * strip_width
+        roi = depth_map[y_start:y_end, sx1:sx2]
+        
+        if roi.size == 0:
+            clear_strips.append(False)
+            depths.append(0.0)
+            continue
+            
+        depth = np.percentile(roi, 50) # Median depth of the strip
+        depths.append(float(depth))
+        clear_strips.append(bool(depth < THRESHOLD))
 
-    center_depth = np.percentile(center_roi, 50) if center_roi.size > 0 else 0.0
-    left_depth = np.percentile(left_roi, 50) if left_roi.size > 0 else 0.0
-    right_depth = np.percentile(right_roi, 50) if right_roi.size > 0 else 0.0
-
-    # STRICTER THRESHOLD: 3.2 instead of 4.0
-    THRESHOLD = 3.2
+    # 3. Determine Center, Left, Right clearance
+    # Center is strips 5 to 10 (the middle third). ALL strips must be clear to walk straight.
+    center_clear = all(clear_strips[5:11])
     
+    # Left is strips 0 to 4, Right is strips 11 to 14. 
+    # ANY clear strip means there is an escape route on that side.
+    left_clear = any(clear_strips[0:5])
+    right_clear = any(clear_strips[11:15])
+
     return {
-        "center_clear": bool(center_depth < THRESHOLD),
-        "left_clear": bool(left_depth < THRESHOLD),
-        "right_clear": bool(right_depth < THRESHOLD),
+        "center_clear": center_clear,
+        "left_clear": left_clear,
+        "right_clear": right_clear,
         "depths": {
-            "center": float(center_depth),
-            "left": float(left_depth),
-            "right": float(right_depth)
+            "center": float(np.mean(depths[5:11])),
+            "left": float(np.mean(depths[0:5])),
+            "right": float(np.mean(depths[11:15]))
         }
     }

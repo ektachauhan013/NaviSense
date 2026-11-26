@@ -2,20 +2,27 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-def classify_spatial_zone(bbox: list, image_width: int) -> str:
+def classify_spatial_zone(bbox: list, image_width: int, image_height: int) -> str:
     """
-    Determines which horizontal zone (LEFT, CENTER, RIGHT) the bounding box is in.
+    Classifies the object into LEFT, CENTER, or RIGHT based on Perspective-Weighted Zones.
+    
+    WHY: A human walking path is a trapezoid. We dynamically adjust the zone boundaries
+    based on the object's vertical position (Y-axis) to accurately model 3D space.
     """
     x1, y1, x2, y2 = bbox
-    
-    # 1. Calculate the center x-coordinate of the bounding box
     center_x = (x1 + x2) / 2.0
+    center_y = (y1 + y2) / 2.0
     
-    # 2. Define the boundaries (33% and 66% of the image width)
-    left_boundary = image_width / 3.0
-    right_boundary = (image_width / 3.0) * 2.0
+    # 1. Calculate vertical ratio (0.0 = top of image, 1.0 = bottom of image)
+    vertical_ratio = center_y / image_height
     
-    # 3. Classify the zone
+    # 2. Dynamic Boundaries
+    # If the object is low (near feet, vertical_ratio ~ 1.0), we shrink the CENTER zone.
+    # If the object is high (near horizon, vertical_ratio ~ 0.0), we expand the CENTER zone.
+    left_boundary = image_width * (0.25 + 0.10 * (1.0 - vertical_ratio))
+    right_boundary = image_width * (0.75 - 0.10 * (1.0 - vertical_ratio))
+    
+    # 3. Classify
     if center_x < left_boundary:
         zone = "LEFT"
     elif center_x > right_boundary:
@@ -23,6 +30,4 @@ def classify_spatial_zone(bbox: list, image_width: int) -> str:
     else:
         zone = "CENTER"
         
-    logger.info(f"Box center X: {center_x:.1f} -> Zone: {zone}")
-    
     return zone
