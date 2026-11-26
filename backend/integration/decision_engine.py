@@ -1,14 +1,21 @@
 import time
 import logging
 import numpy as np
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
+
+# Ensure project root is in sys.path
+import os
+import sys
+sys.path.insert(0, os.path.abspath("."))
+
+# Import constants from config
+from backend.utils.config import (
+    COOLDOWN_SECONDS,
+    UNCERTAINTY_VARIANCE_THRESHOLD,
+    UNCERTAINTY_DEPTH_THRESHOLD
+)
 
 logger = logging.getLogger(__name__)
-
-# --- THRESHOLDS FOR SAFETY STATE MACHINE ---
-UNCERTAINTY_VARIANCE_THRESHOLD = 0.15 # If depth variance is below this, it's a flat surface (wall/glass)
-UNCERTAINTY_DEPTH_THRESHOLD = 2.5     # ...but only if it's somewhat close.
-COOLDOWN_SECONDS = 2.5                # Wait 2.5s before speaking the same warning again
 
 class DecisionEngine:
     """
@@ -77,15 +84,18 @@ class DecisionEngine:
                 
             # Rule B: Center path blocked, but sides are open -> CAUTION
             elif center_blocked:
-                if free_space_result.get("left_clear", False) and not free_space_result.get("right_clear", False):
+                left_clear = free_space_result.get("left_clear", False)
+                right_clear = free_space_result.get("right_clear", False)
+                
+                if left_clear and not right_clear:
                     state = "CAUTION"
                     advice = "Obstacle directly ahead. Steer left immediately."
                     reason = "Center_Blocked_Steer_Left"
-                elif free_space_result.get("right_clear", False) and not free_space_result.get("left_clear", False):
+                elif right_clear and not left_clear:
                     state = "CAUTION"
                     advice = "Obstacle directly ahead. Steer right immediately."
                     reason = "Center_Blocked_Steer_Right"
-                elif free_space_result.get("left_clear", False) and free_space_result.get("right_clear", False):
+                elif left_clear and right_clear:
                     state = "CAUTION"
                     advice = "Obstacle directly ahead. Steer left or right to go around."
                     reason = "Center_Blocked_Both_Sides_Open"

@@ -5,6 +5,13 @@ from transformers import AutoImageProcessor, AutoModelForDepthEstimation
 import logging
 import matplotlib.pyplot as plt
 import os
+import sys
+
+# Ensure project root is in sys.path
+sys.path.insert(0, os.path.abspath("."))
+
+# Import constants from config
+from backend.utils.config import ALPHA_MOVING, ALPHA_STATIC, MOTION_DIFF_THRESHOLD
 
 logger = logging.getLogger(__name__)
 
@@ -62,12 +69,12 @@ class DepthEstimator:
             # If the scene is changing rapidly (user walking), diff will be high.
             diff = np.mean(np.abs(raw_depth_map - self.smoothed_depth_map))
             
-            if diff > 0.5:
-                # High motion: Trust the new frame more (alpha = 0.8)
-                alpha = 0.8
+            if diff > MOTION_DIFF_THRESHOLD:
+                # High motion: Trust the new frame more
+                alpha = ALPHA_MOVING
             else:
-                # Stationary: Smooth heavily to eliminate flicker (alpha = 0.3)
-                alpha = 0.3
+                # Stationary: Smooth heavily to eliminate flicker
+                alpha = ALPHA_STATIC
                 
             # EMA Formula: D_smooth = (alpha * D_new) + ((1 - alpha) * D_old)
             self.smoothed_depth_map = (alpha * raw_depth_map) + ((1.0 - alpha) * self.smoothed_depth_map)
@@ -82,10 +89,12 @@ if __name__ == "__main__":
     image_path = "datasets/test_image.jpg" 
     
     if not os.path.exists(image_path):
-        logger.error(f"Image not found at {image_path}!")
+        logger.error(f"Image not found at {image_path}! Please put an image there.")
         exit()
         
     real_image = Image.open(image_path).convert("RGB")
+    logger.info(f"Loaded image with size: {real_image.size}")
+    
     estimator = DepthEstimator()
     
     # Run it twice to simulate a video feed and test the EMA state
@@ -98,19 +107,24 @@ if __name__ == "__main__":
     logger.info(f"Success! Output shape: {depth_result_2.shape}")
     logger.info(f"Min depth: {depth_result_2.min():.4f}, Max depth: {depth_result_2.max():.4f}")
     
-    # Visualization
+    # 4. Visualize the results using Matplotlib
     fig, axes = plt.subplots(1, 2, figsize=(12, 6))
     
+    # Left: Original image
     axes[0].imshow(real_image)
     axes[0].set_title("Original Image")
     axes[0].axis("off")
     
+    # Right: Smoothed Depth map
+    # 'inferno' colormap: Brighter (yellow) = closer, Darker (purple) = farther
     im = axes[1].imshow(depth_result_2, cmap="inferno")
     axes[1].set_title("Smoothed Depth Map (EMA)")
     axes[1].axis("off")
     
+    # Add a colorbar to show the scale
     fig.colorbar(im, ax=axes[1], fraction=0.046, pad=0.04)
     
+    # Save the plot to the experiments folder
     os.makedirs("experiments", exist_ok=True)
     output_path = "experiments/depth_visualization.png"
     plt.savefig(output_path, bbox_inches="tight")

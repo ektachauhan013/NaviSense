@@ -33,6 +33,7 @@
             height: 100%;
             pointer-events: none;
         }
+        
         /* --- DEVELOPER TELEMETRY HUD --- */
         #telemetry-hud {
             position: absolute;
@@ -76,6 +77,7 @@
             margin-bottom: 20px;
             text-align: center;
             padding: 0 10px;
+            transition: color 0.3s ease;
         }
         #start-btn {
             padding: 15px 40px;
@@ -140,21 +142,47 @@
         let isRunning = false;
         let isProcessing = false;
         
+        // Temporal Smoothing Variables
         let adviceHistory = [];
         const SMOOTHING_WINDOW = 3; 
         let lastSpokenAdvice = "";
         let lastSpokenTime = 0;
         
+        // FPS Counter
         let lastFrameTime = Date.now();
         let frameCount = 0;
 
-        // Audio Context for spatial panning
+        // --- WEB AUDIO API (For Spatial Sonar Pings) ---
         let audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         let panner = audioCtx.createStereoPanner();
         panner.connect(audioCtx.destination);
 
+        // Play a directional ping before the voice
+        function playDirectionalPing(panValue) {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            
+            const osc = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(880, audioCtx.currentTime); // High pitch ping
+            
+            // Smooth fade out to avoid audio popping
+            gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.3);
+            
+            panner.pan.value = panValue; // -0.8 for left, 0.8 for right
+            
+            osc.connect(gainNode);
+            gainNode.connect(panner);
+            
+            osc.start();
+            osc.stop(audioCtx.currentTime + 0.3);
+        }
+
         async function startCamera() {
             try {
+                // Request back camera on mobile
                 const stream = await navigator.mediaDevices.getUserMedia({ 
                     video: { facingMode: "environment" } 
                 });
@@ -171,6 +199,7 @@
         async function captureLoop() {
             if (!isRunning) return;
 
+            // Skip frame if server is busy processing
             if (isProcessing) {
                 requestAnimationFrame(captureLoop);
                 return;
@@ -184,6 +213,7 @@
                 return;
             }
 
+            // Resize logic (max 640px longest side)
             const maxSide = 640;
             let targetWidth = videoWidth;
             let targetHeight = videoHeight;
@@ -202,7 +232,6 @@
                 if (!blob) return;
                 
                 isProcessing = true;
-                const sendTime = Date.now();
                 
                 const formData = new FormData();
                 formData.append("file", blob, "frame.jpg");
@@ -218,9 +247,10 @@
                         handleResponse(data);
                     }
                 } catch (e) {
-                    console.error("Error:", e);
+                    console.error("Network Error:", e);
                 } finally {
                     isProcessing = false;
+                    
                     // Calculate FPS
                     frameCount++;
                     const now = Date.now();
@@ -232,7 +262,7 @@
                 }
             }, 'image/jpeg', 0.8);
 
-            // Fast polling (backend frame skipping handles the load)
+            // Poll fast, let the backend frame-skipping handle CPU load
             setTimeout(() => requestAnimationFrame(captureLoop), 150); 
         }
 
@@ -250,12 +280,12 @@
                 hudState.className = `state-${data.state}`;
             }
 
-            // 2. Draw Visuals
+            // 2. Draw Visual Overlay
             drawOverlay(data.objects);
 
             // 3. Temporal Smoothing for Voice
             const rawAdvice = data.advice;
-            if (!rawAdvice) return; // Cooldown suppressed it
+            if (!rawAdvice) return; // Advice was suppressed by backend cooldown
             
             adviceHistory.push(rawAdvice);
             if (adviceHistory.length > SMOOTHING_WINDOW) {
@@ -268,8 +298,13 @@
                 if (allMatch) {
                     const stableAdvice = adviceHistory[0];
                     adviceText.innerText = stableAdvice;
-                    adviceText.style.color = data.state === "STOP" ? "#ff4444" : (data.state === "CAUTION" ? "#ffcc00" : "#4CAF50");
+                    
+                    // Color code the text based on state
+                    if (data.state === "STOP") adviceText.style.color = "#ff4444";
+                    else if (data.state === "CAUTION") adviceText.style.color = "#ffcc00";
+                    else adviceText.style.color = "#4CAF50";
 
+                    // Speak if new advice, or if 3 seconds have passed
                     const now = Date.now();
                     if (stableAdvice !== lastSpokenAdvice || (now - lastSpokenTime > 3000)) {
                         speak(stableAdvice);
@@ -296,20 +331,24 @@
                 const drawW = (x2 - x1) * scaleX;
                 const drawH = (y2 - y1) * scaleY;
 
-                let color = "#00FF00"; 
-                if (obj.risk_level === "HIGH") color = "#FF0000"; 
-                else if (obj.risk_level === "MEDIUM") color = "#FFFF00"; 
+                // Color code based on risk level
+                let color = "#00FF00"; // Green
+                if (obj.risk_level === "HIGH") color = "#FF0000"; // Red
+                else if (obj.risk_level === "MEDIUM") color = "#FFFF00"; // Yellow
 
+                // Draw bounding box
                 overlayCtx.strokeStyle = color;
                 overlayCtx.lineWidth = 3;
                 overlayCtx.strokeRect(drawX, drawY, drawW, drawH);
 
+                // Draw label background
                 overlayCtx.fillStyle = color;
                 const text = `${obj.label} (${obj.proximity})`;
                 overlayCtx.font = "14px 'Courier New', monospace";
                 const textWidth = overlayCtx.measureText(text).width;
                 overlayCtx.fillRect(drawX, Math.max(0, drawY - 20), textWidth + 8, 20);
 
+                // Draw label text
                 overlayCtx.fillStyle = "black";
                 overlayCtx.fillText(text, drawX + 4, Math.max(14, drawY - 5));
             });
@@ -318,19 +357,25 @@
         function speak(text) {
             if ('speechSynthesis' in window) {
                 window.speechSynthesis.cancel(); 
-                const utterance = new SpeechSynthesisUtterance(text);
                 
-                if (text.includes("left")) panner.pan.value = -0.8;
-                else if (text.includes("right")) panner.pan.value = 0.8;
-                else panner.pan.value = 0.0;
+                // Play spatial ping BEFORE the voice
+                if (text.includes("left")) {
+                    playDirectionalPing(-0.8); // Left ear
+                } else if (text.includes("right")) {
+                    playDirectionalPing(0.8);  // Right ear
+                }
 
+                const utterance = new SpeechSynthesisUtterance(text);
                 utterance.rate = 1.1; 
                 window.speechSynthesis.speak(utterance);
             }
         }
 
         startBtn.addEventListener('click', () => {
-            if (audioCtx.state === 'suspended') audioCtx.resume();
+            // Resume AudioContext (Required by browser autoplay policies)
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
             startCamera();
         });
     </script>
