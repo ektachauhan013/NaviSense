@@ -3,10 +3,10 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>NaviSense</title>
+    <title>NaviSense - Spatial Intelligence</title>
     <style>
         body {
-            font-family: Arial, sans-serif;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background-color: #121212;
             color: white;
             text-align: center;
@@ -17,7 +17,7 @@
         #video-container {
             position: relative;
             width: 100vw;
-            height: 60vh;
+            height: 65vh;
             background: black;
         }
         video {
@@ -25,26 +25,43 @@
             height: 100%;
             object-fit: cover;
         }
-        /* The overlay canvas sits exactly on top of the video */
         #overlay {
             position: absolute;
             top: 0;
             left: 0;
             width: 100%;
             height: 100%;
-            pointer-events: none; /* Let clicks pass through to the video/buttons */
+            pointer-events: none;
         }
-        #status-overlay {
+        /* --- DEVELOPER TELEMETRY HUD --- */
+        #telemetry-hud {
             position: absolute;
-            bottom: 10px;
-            left: 10px;
-            background: rgba(0, 0, 0, 0.7);
-            padding: 10px;
-            border-radius: 5px;
-            font-size: 14px;
+            top: 15px;
+            right: 15px;
+            background: rgba(0, 0, 0, 0.75);
+            border: 1px solid #333;
+            border-radius: 8px;
+            padding: 12px;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 12px;
+            text-align: left;
+            color: #00ffcc;
+            min-width: 200px;
+            backdrop-filter: blur(4px);
+            display: none; /* Hidden until camera starts */
         }
+        .hud-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 4px;
+        }
+        .hud-label { color: #888; }
+        .state-CLEAR { color: #00ff00; font-weight: bold; }
+        .state-CAUTION { color: #ffcc00; font-weight: bold; }
+        .state-STOP { color: #ff0000; font-weight: bold; }
+        
         #advice-container {
-            height: 40vh;
+            height: 35vh;
             display: flex;
             flex-direction: column;
             justify-content: center;
@@ -53,7 +70,7 @@
             background-color: #1e1e1e;
         }
         #advice-text {
-            font-size: 24px;
+            font-size: 26px;
             font-weight: bold;
             color: #4CAF50;
             margin-bottom: 20px;
@@ -61,13 +78,15 @@
             padding: 0 10px;
         }
         #start-btn {
-            padding: 15px 30px;
+            padding: 15px 40px;
             font-size: 18px;
             background-color: #4CAF50;
             color: white;
             border: none;
             border-radius: 8px;
             cursor: pointer;
+            font-weight: bold;
+            transition: background-color 0.2s;
         }
         #start-btn:disabled {
             background-color: #555;
@@ -80,7 +99,17 @@
     <div id="video-container">
         <video id="camera" autoplay playsinline muted></video>
         <canvas id="overlay"></canvas>
-        <div id="status-overlay">Status: <span id="status">Disconnected</span></div>
+        
+        <!-- Telemetry HUD -->
+        <div id="telemetry-hud">
+            <div class="hud-row"><span class="hud-label">FPS:</span> <span id="hud-fps">0</span></div>
+            <div class="hud-row"><span class="hud-label">Total Latency:</span> <span id="hud-latency">0</span> ms</div>
+            <div class="hud-row"><span class="hud-label">Depth Inference:</span> <span id="hud-depth">0</span> ms</div>
+            <div class="hud-row"><span class="hud-label">Depth Skipped:</span> <span id="hud-skip">No</span></div>
+            <div class="hud-row" style="margin-top: 8px; border-top: 1px solid #444; padding-top: 8px;">
+                <span class="hud-label">AI State:</span> <span id="hud-state" class="state-CLEAR">CLEAR</span>
+            </div>
+        </div>
     </div>
 
     <div id="advice-container">
@@ -88,7 +117,6 @@
         <button id="start-btn">Start NaviSense</button>
     </div>
 
-    <!-- Hidden canvas used to resize and capture frames before sending to backend -->
     <canvas id="capture-canvas" style="display: none;"></canvas>
 
     <script>
@@ -99,52 +127,55 @@
         const ctx = captureCanvas.getContext('2d');
         
         const startBtn = document.getElementById('start-btn');
-        const statusSpan = document.getElementById('status');
         const adviceText = document.getElementById('advice-text');
+        const telemetryHud = document.getElementById('telemetry-hud');
+
+        // HUD Elements
+        const hudFps = document.getElementById('hud-fps');
+        const hudLatency = document.getElementById('hud-latency');
+        const hudDepth = document.getElementById('hud-depth');
+        const hudSkip = document.getElementById('hud-skip');
+        const hudState = document.getElementById('hud-state');
 
         let isRunning = false;
         let isProcessing = false;
         
-        // Smoothing variables
         let adviceHistory = [];
         const SMOOTHING_WINDOW = 3; 
         let lastSpokenAdvice = "";
         let lastSpokenTime = 0;
+        
+        let lastFrameTime = Date.now();
+        let frameCount = 0;
 
-        // Initialize Audio Context for spatial panning
+        // Audio Context for spatial panning
         let audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         let panner = audioCtx.createStereoPanner();
         panner.connect(audioCtx.destination);
 
-        // 1. Start Camera
         async function startCamera() {
             try {
-                // Request the back camera on mobile
                 const stream = await navigator.mediaDevices.getUserMedia({ 
                     video: { facingMode: "environment" } 
                 });
                 video.srcObject = stream;
-                statusSpan.innerText = "Connected";
                 startBtn.disabled = true;
                 isRunning = true;
+                telemetryHud.style.display = "block";
                 captureLoop();
             } catch (err) {
-                alert("Camera access denied or unavailable: " + err.message);
+                alert("Camera access denied: " + err.message);
             }
         }
 
-        // 2. Capture and Send Frames to Backend
         async function captureLoop() {
             if (!isRunning) return;
 
-            // If the backend is still processing the last frame, skip this one
             if (isProcessing) {
                 requestAnimationFrame(captureLoop);
                 return;
             }
 
-            // Resize logic: max side 640px. 
-            // We send 640px to the backend to keep latency low, and scale boxes back up for the screen.
             const videoWidth = video.videoWidth;
             const videoHeight = video.videoHeight;
             
@@ -171,7 +202,7 @@
                 if (!blob) return;
                 
                 isProcessing = true;
-                statusSpan.innerText = "Processing...";
+                const sendTime = Date.now();
                 
                 const formData = new FormData();
                 formData.append("file", blob, "frame.jpg");
@@ -187,27 +218,45 @@
                         handleResponse(data);
                     }
                 } catch (e) {
-                    console.error("Error sending frame:", e);
+                    console.error("Error:", e);
                 } finally {
                     isProcessing = false;
-                    statusSpan.innerText = "Connected";
+                    // Calculate FPS
+                    frameCount++;
+                    const now = Date.now();
+                    if (now - lastFrameTime >= 1000) {
+                        hudFps.innerText = frameCount;
+                        frameCount = 0;
+                        lastFrameTime = now;
+                    }
                 }
             }, 'image/jpeg', 0.8);
 
-            // Target ~2 FPS because the backend takes ~2.2s per frame on CPU
-            setTimeout(() => requestAnimationFrame(captureLoop), 200); 
+            // Fast polling (backend frame skipping handles the load)
+            setTimeout(() => requestAnimationFrame(captureLoop), 150); 
         }
 
-        // 3. Handle Response, Smoothing, and Voice
         function handleResponse(data) {
-            if (data.status === "busy") return; // Backend dropped the frame
+            if (data.status === "busy") return;
 
-            const rawAdvice = data.advice;
-            
-            // Draw the visual boxes immediately (doesn't need smoothing)
+            // 1. Update Telemetry HUD
+            if (data.timing_ms) {
+                hudLatency.innerText = data.timing_ms.total;
+                hudDepth.innerText = data.timing_ms.depth;
+                hudSkip.innerText = data.timing_ms.depth_ran ? "No" : "Yes (Cached)";
+            }
+            if (data.state) {
+                hudState.innerText = data.state;
+                hudState.className = `state-${data.state}`;
+            }
+
+            // 2. Draw Visuals
             drawOverlay(data.objects);
 
-            // Temporal smoothing for voice: only speak if the last 3 frames agree
+            // 3. Temporal Smoothing for Voice
+            const rawAdvice = data.advice;
+            if (!rawAdvice) return; // Cooldown suppressed it
+            
             adviceHistory.push(rawAdvice);
             if (adviceHistory.length > SMOOTHING_WINDOW) {
                 adviceHistory.shift(); 
@@ -219,94 +268,69 @@
                 if (allMatch) {
                     const stableAdvice = adviceHistory[0];
                     adviceText.innerText = stableAdvice;
+                    adviceText.style.color = data.state === "STOP" ? "#ff4444" : (data.state === "CAUTION" ? "#ffcc00" : "#4CAF50");
 
-                    // Voice Output
                     const now = Date.now();
-                    // Don't repeat the exact same advice too rapidly (wait at least 3.5 seconds)
-                    if (stableAdvice !== lastSpokenAdvice || (now - lastSpokenTime > 3500)) {
+                    if (stableAdvice !== lastSpokenAdvice || (now - lastSpokenTime > 3000)) {
                         speak(stableAdvice);
                         lastSpokenAdvice = stableAdvice;
                         lastSpokenTime = now;
                     }
-                } else {
-                    // If they don't match, we are in a transition state
-                    adviceText.innerText = "Analyzing environment...";
                 }
             }
         }
 
-        // 4. Draw Bounding Boxes on the Overlay
         function drawOverlay(objects) {
-            // Match the overlay canvas drawing buffer to its CSS display size
             overlayCanvas.width = overlayCanvas.clientWidth;
             overlayCanvas.height = overlayCanvas.clientHeight;
-            
             overlayCtx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
 
-            // Calculate scaling factor (backend sends 640px image, display might be 1080p)
             const scaleX = overlayCanvas.width / captureCanvas.width;
             const scaleY = overlayCanvas.height / captureCanvas.height;
 
             objects.forEach(obj => {
                 const [x1, y1, x2, y2] = obj.bbox;
                 
-                // Scale coordinates to the display canvas
                 const drawX = x1 * scaleX;
                 const drawY = y1 * scaleY;
                 const drawW = (x2 - x1) * scaleX;
                 const drawH = (y2 - y1) * scaleY;
 
-                // Color code by risk level
-                let color = "#00FF00"; // GREEN (Low)
-                if (obj.risk_level === "HIGH") color = "#FF0000"; // RED
-                else if (obj.risk_level === "MEDIUM") color = "#FFFF00"; // YELLOW
+                let color = "#00FF00"; 
+                if (obj.risk_level === "HIGH") color = "#FF0000"; 
+                else if (obj.risk_level === "MEDIUM") color = "#FFFF00"; 
 
-                // Draw box
                 overlayCtx.strokeStyle = color;
-                overlayCtx.lineWidth = 4;
+                overlayCtx.lineWidth = 3;
                 overlayCtx.strokeRect(drawX, drawY, drawW, drawH);
 
-                // Draw label background
                 overlayCtx.fillStyle = color;
                 const text = `${obj.label} (${obj.proximity})`;
-                overlayCtx.font = "bold 16px Arial";
+                overlayCtx.font = "14px 'Courier New', monospace";
                 const textWidth = overlayCtx.measureText(text).width;
-                overlayCtx.fillRect(drawX, Math.max(0, drawY - 24), textWidth + 10, 24);
+                overlayCtx.fillRect(drawX, Math.max(0, drawY - 20), textWidth + 8, 20);
 
-                // Draw label text
                 overlayCtx.fillStyle = "black";
-                overlayCtx.fillText(text, drawX + 5, Math.max(16, drawY - 6));
+                overlayCtx.fillText(text, drawX + 4, Math.max(14, drawY - 5));
             });
         }
 
-        // 5. Voice Output with Spatial Audio Logic
         function speak(text) {
             if ('speechSynthesis' in window) {
                 window.speechSynthesis.cancel(); 
-                
                 const utterance = new SpeechSynthesisUtterance(text);
                 
-                // Spatial Audio Logic: Pan the voice to the ear where the danger is
-                if (text.includes("left")) {
-                    panner.pan.value = -1.0; // Left ear
-                } 
-                else if (text.includes("right")) {
-                    panner.pan.value = 1.0;  // Right ear
-                } 
-                else {
-                    panner.pan.value = 0.0;  // Center
-                }
+                if (text.includes("left")) panner.pan.value = -0.8;
+                else if (text.includes("right")) panner.pan.value = 0.8;
+                else panner.pan.value = 0.0;
 
-                utterance.rate = 1.1; // Slightly faster speech for urgency
+                utterance.rate = 1.1; 
                 window.speechSynthesis.speak(utterance);
             }
         }
 
         startBtn.addEventListener('click', () => {
-            // Resume audio context if browser blocked it initially
-            if (audioCtx.state === 'suspended') {
-                audioCtx.resume();
-            }
+            if (audioCtx.state === 'suspended') audioCtx.resume();
             startCamera();
         });
     </script>
